@@ -168,9 +168,9 @@ class GridEnvironment(gym.Env):
 
 
 # Q-learning parameters
-alpha = 0.1
+alpha = 0.2
 gamma = 0.99
-epsilon = 1.0
+epsilon = 2.0
 min_epsilon = 0.01
 epsilon_decay = 0.995
 num_episodes = 100
