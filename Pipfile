@@ -7,11 +7,11 @@ name = "pypi"
 gymnasium = "*"
 pygame = "*"
 swig = "*"
-box2d = "*"
-box2d-kengz = "*"
 numpy = "*"
+tensorflow-macos = "*"
+tensorflow-metal = "*"
 
 [dev-packages]
 
 [requires]
-python_version = "3.11"
+python_version = "3.8"

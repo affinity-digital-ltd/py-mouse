@@ -1,12 +1,10 @@
 import gymnasium as gym
 import pygame
 import numpy as np
-import random
 import time
 from gymnasium import spaces
-import os
-import pickle
-import itertools
+from dqn_agent import DQNAgent
+import random
 
 pygame.init()
 pygame.font.init()
@@ -86,13 +84,16 @@ class GridEnvironment(gym.Env):
             abs(cheese_relative_x) <= self.vision_range
             and abs(cheese_relative_y) <= self.vision_range
         ):
+            out_of_vision = 0
             next_obs = (
-                cheese_relative_x // env.cell_size,
-                cheese_relative_y // env.cell_size,
+                cheese_relative_x // self.cell_size,
+                cheese_relative_y // self.cell_size,
+                out_of_vision,
             )
 
         else:
-            next_obs = ("out_of_vision",)
+            out_of_vision = 1
+            next_obs = (0, 0, out_of_vision)
 
         done = np.all(self.agent_position == self.reward_position)
         reward = 1 if done else -0.1
@@ -100,19 +101,23 @@ class GridEnvironment(gym.Env):
         return next_obs, reward, done, {}
 
     def reset(self):
-        self.agent_position = (
-            np.random.randint(0, self.grid_size * self.cell_size, 2)
-            // self.cell_size
-            * self.cell_size
-        )
-        self.reward_position = (
-            np.random.randint(0, self.grid_size * self.cell_size, 2)
-            // self.cell_size
-            * self.cell_size
-        )
         self.start_time = time.time()
 
-        return np.concatenate((self.agent_position, self.reward_position))
+        # Randomize initial positions
+        self.agent_position = np.array(
+            [random.randrange(0, self.grid_size, self.cell_size) for _ in range(2)]
+        )
+        self.reward_position = np.array(
+            [random.randrange(0, self.grid_size, self.cell_size) for _ in range(2)]
+        )
+
+        # Initialize the mouse image based on the initial position
+        self.current_mouse_image = self.mouse_images["up"]
+
+        # Check if the agent is out of vision range
+        distance = np.linalg.norm(self.agent_position - self.reward_position)
+        out_of_vision = distance > self.vision_range
+        return self.agent_position, self.reward_position, out_of_vision
 
     def render(self, episode, num_died, num_rewarded):
         self.screen.fill((255, 255, 255))
@@ -167,39 +172,30 @@ class GridEnvironment(gym.Env):
         pygame.quit()
 
 
-# Q-learning parameters
-alpha = 0.2
-gamma = 0.99
-epsilon = 2.0
+env = GridEnvironment()
+
+# DQN parameters
+gamma = 0.95
+epsilon = 1.0
 min_epsilon = 0.01
 epsilon_decay = 0.995
 num_episodes = 100
-
-env = GridEnvironment()
-
-# Initialize the Q-table
-state_size = (env.grid_size, env.grid_size, env.grid_size, env.grid_size)
+batch_size = 64
+update_frequency = 5
 num_died = 0
 num_rewarded = 0
 
-# Load the Q-table
-if os.path.exists("q_table.pkl"):
-    with open("q_table.pkl", "rb") as f:
-        q_table = pickle.load(f)
-else:
-    q_table = {
-        (*coord, action): 0
-        for coord in itertools.product(
-            range(state_size[0]), range(state_size[1]), ["out_of_vision"]
-        )
-        for action in range(env.action_space.n)
-    }
+# Initialize the DQN agent
+input_state_size = 5  # As you have 5 states including "out_of_vision"
+action_size = env.action_space.n
+agent = DQNAgent(input_state_size, action_size)
 
-
+# Training loop
 for episode in range(num_episodes):
     start_time = time.time()
     done = False
-    obs = env.reset()
+    agent_position, cheese_position, out_of_vision = env.reset()
+    obs = np.array((*agent_position, *cheese_position, out_of_vision))
 
     while not done:
         for event in pygame.event.get():
@@ -209,34 +205,17 @@ for episode in range(num_episodes):
 
         env.render(episode, num_died, num_rewarded)
 
-        if np.array_equal(obs, np.array(["out_of_vision"])):
-            q_values = [0] * env.action_space.n
-        else:
-            q_values = [q_table.get((*obs, a), 0) for a in range(env.action_space.n)]
-
-        if random.uniform(0, 1) < epsilon:
-            action = env.action_space.sample()
-        else:
-            action = np.argmax(q_values)
-
+        action = agent.choose_action(obs)
         next_obs, reward, done, _ = env.step(action)
+        next_obs = np.reshape(
+            next_obs, [1, input_state_size]
+        )  # Use input_state_size here
 
-        if not np.array_equal(next_obs, np.array(["out_of_vision"])):
-            next_obs = tuple(next_obs[i] // env.cell_size for i in range(2))
-
-        # Update Q-values
-        if np.array_equal(next_obs, np.array(["out_of_vision"])):
-            next_q_values = [0] * env.action_space.n
-        else:
-            next_q_values = [
-                q_table.get((*next_obs, a), 0) for a in range(env.action_space.n)
-            ]
-        q_key = (*obs, action)
-        q_table[q_key] = q_table.get(q_key, 0) + alpha * (
-            reward + gamma * np.max(next_q_values) - q_table.get(q_key, 0)
-        )
-
+        agent.remember(obs, action, reward, next_obs, done)
         obs = next_obs
+
+        if len(agent.memory) > batch_size:
+            agent.replay(batch_size)
 
         if time.time() - start_time > env.time_limit:  # Reset after 10 seconds
             num_died += 1
@@ -245,14 +224,37 @@ for episode in range(num_episodes):
         if done:  # The reward was found
             num_rewarded += 1
 
-        # pygame.time.delay(100)
-
     # Decay epsilon for the next episode
-    epsilon = max(min_epsilon, epsilon_decay * epsilon)
+    agent.epsilon = max(min_epsilon, epsilon_decay * agent.epsilon)
 
-# Save the learning
-with open("q_table.pkl", "wb") as f:
-    pickle.dump(q_table, f)
+# Save the final model
+agent.save("dqn_weights_final.h5")
+
+print("Training complete.")
+
+# Test the trained agent
+agent.load("dqn_weights_final.h5")
+agent.epsilon = 0  # Disable exploration
+
+for episode in range(10):
+    state = env.reset()
+    state = np.reshape(state, [1, input_state_size])
+    done = False
+    step = 0
+
+    while not done:
+        env.render(
+            episode, num_died, num_rewarded
+        )  # Update render method with appropriate arguments
+        action = agent.choose_action(state)
+        next_state, reward, done, _ = env.step(action)
+        next_state = np.reshape(next_state, [1, input_state_size])
+        state = next_state
+        step += 1
+
+        if done:
+            print(f"Test Episode: {episode + 1}, Score: {step}")
+            break
 
 print(f"Episodes: {episode + 1} | Rewards: {num_rewarded}")
 
